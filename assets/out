@@ -1,0 +1,98 @@
+#!/bin/bash
+
+exec 3>&1 # make stdout available as fd 3 for the result
+exec 1>&2 # redirect all output to stderr for logging
+
+SRC_DIR=$1
+
+source $(dirname $0)/shared.sh
+
+AWS_CLI=$(which aws)
+ECS="$AWS_CLI --output json ecs"
+
+INPUT='/tmp/input'
+cat > $INPUT <&0
+
+CLUSTER_NAME=$(jq -r '.source.cluster_name // ""' < $INPUT) # cluster_name: svc-ui-footer-cluster
+IMAGE_NAME=$(jq -r '.source.image_name // ""' < $INPUT) # image_name: hbc-docker.jfrog.io/svc-ui-footer
+REGION=$(jq -r '.source.region // ""' < $INPUT) # region: us-east-1
+CACHE=$(jq -r '.params.cache // ""' < $INPUT)
+SERVICE_NAME=$(jq -r '.params.service_name // ""' < $INPUT)
+TAG=$(jq -r '.params.tag // ""' < $INPUT)
+
+# Sanity check config/params
+if [ -z "$CLUSTER_NAME" ]; then
+  echo "[error] aws-ecs-resource: missing cluster name."
+  exit 1
+elif [ -z "$IMAGE_NAME" ]; then
+  echo "[error] aws-ecs-resource: missing image name."
+  exit 1
+elif [ -z "$REGION" ]; then
+  echo "[error] aws-ecs-resource: missing aws region."
+  exit 1
+elif [ -z "$SERVICE_NAME" ]; then
+  echo "[error] aws-ecs-resource: missing service name."
+  exit 1
+elif [ -z "$TAG" ] && [ -z "$CACHE" ]; then
+  echo "[error] aws-ecs-resource: missing tag name or existing cache."
+  exit 1
+fi
+
+# Setup essential environment config
+export AWS_DEFAULT_REGION=$REGION
+
+# Update cache to match cache location
+APP_CACHE=$SRC_DIR/$CACHE
+
+if [ ! -e "$APP_CACHE/history" ]; then
+  # Update tag to be the provided hash
+  TAG=$(cat "$SRC_DIR/$TAG")
+  IMAGE_WITH_TAG=$IMAGE_NAME:$TAG
+
+  # Determine image name
+  parseImageName
+  echo "Using image name: $useImage"
+
+  # Get current task definition
+  getCurrentTaskDefinition
+  echo "Current task definition: $TASK_DEFINITION_ARN";
+
+  # create new task definition json
+  createNewTaskDefJson
+
+  # Register updated task definition, ie: arn:aws:ecs:us-east-1:195056086334:task-definition/svc-ui-footer-task:26
+  registerNewTaskDefinition
+  echo "New task definition: $NEW_TASKDEF";
+
+  UPDATE=`$ECS update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --task-definition $NEW_TASKDEF`
+
+  if [ $? -eq 0 ]; then
+    echo "Updated service '$SERVICE_NAME' in cluster '$CLUSTER_NAME' with task definition '$NEW_TASKDEF'"
+
+    # Output resulting "version"
+    OUTPUT_STRING="{ \"version\": { \"ref\": \"$NEW_TASKDEF\"} }"
+
+    echo $OUTPUT_STRING >&3
+    exit 0
+  fi
+
+  echo "There was an error trying to run the 'aws ecs update-service' command."
+  exit 1
+else
+  EXISTING_ARN=$(cat $APP_CACHE/history)
+  echo "Found existing task definition ARN!"
+
+  UPDATE=`$ECS update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --task-definition $EXISTING_ARN`
+
+  if [ $? -eq 0 ]; then
+    echo "Updated service '$SERVICE_NAME' in cluster '$CLUSTER_NAME' with task definition '$EXISTING_ARN'"
+
+    OUTPUT_STRING="{ \"version\": { \"ref\": \"$EXISTING_ARN\"} }"
+
+    echo $OUTPUT_STRING >&3
+    exit 0
+  fi
+
+  echo "There was an error trying to run the 'aws ecs update-service' command."
+  exit 1
+fi

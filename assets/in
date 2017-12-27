@@ -1,0 +1,25 @@
+#!/bin/bash
+
+exec 3>&1 # make stdout available as fd 3 for the result
+exec 1>&2 # redirect all output to stderr for logging
+
+DEST_DIR=$1
+
+INPUT='/tmp/input'
+cat > $INPUT <&0
+
+VERSION=$(jq -r '.version.ref // ""' < $INPUT)
+
+if [ -z "$VERSION" ]; then
+  echo "[error] aws-ecs-resource: no version to fetch. do a 'put' first?"
+  exit 1
+fi
+
+echo "Creating history of task definition ARN: $VERSION"
+
+echo "$VERSION" >> "$DEST_DIR/history"
+
+OUTPUT_STRING="{ \"version\": { \"ref\": \"$VERSION\"} }"
+
+echo $OUTPUT_STRING >&3
+exit 0
